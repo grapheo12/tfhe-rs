@@ -1,0 +1,381 @@
+extern crate blas_src;
+
+use concrete_csprng::generators::SoftwareRandomGenerator;
+
+// use crate::core_crypto::algorithms::slice_algorithms::*;
+use crate::core_crypto::algorithms::*;
+// use crate::core_crypto::commons::dispersion::DispersionParameter;
+use crate::core_crypto::commons::generators::{EncryptionRandomGenerator, SecretRandomGenerator};
+use crate::core_crypto::commons::math::random::{ActivatedRandomGenerator, Gaussian, RandomGenerator};
+
+use crate::core_crypto::commons::{parameters::*, ciphertext_modulus};
+// use crate::core_crypto::commons::traits::*;
+use crate::core_crypto::entities::*;
+use crate::core_crypto::prelude::StandardDev;
+use crate::core_crypto::seeders::new_seeder;
+use std::collections::HashMap;
+use std::hash::Hash;
+use std::ops::IndexMut;
+use crate::boolean::{client_key::ClientKey, server_key::ServerKey};
+use crate::boolean::parameters::{DEFAULT_PARAMETERS, TFHE_LIB_PARAMETERS};
+
+use ndarray::prelude::*;
+
+type TorusType = u32;
+type LweSampleType = Vec<TorusType>;
+
+
+pub struct ThFHEPubKey {
+    pub n: LweSize,
+    pub n_samples: usize,
+    pub alpha: StandardDev,
+    pub samples: Vec<LweCiphertext<Vec<TorusType>>>,
+    prng: SecretRandomGenerator<SoftwareRandomGenerator>
+}
+
+impl ThFHEPubKey {
+    pub fn new(sk: &LweSecretKey<LweSampleType>, n_samples_: usize) -> Self {
+        let mut samples = Vec::new();
+
+        let mut seeder = new_seeder();
+        let seeder = seeder.as_mut();
+
+        let secret_generator =
+            SecretRandomGenerator::<ActivatedRandomGenerator>::new(seeder.seed());
+
+        let mut enc_generator =
+            EncryptionRandomGenerator::<ActivatedRandomGenerator>::new(seeder.seed(), seeder);
+
+        let noise_param = StandardDev(0.01);
+
+        for _ in 0..n_samples_ {
+            let mut ctxt = LweCiphertext::new(
+                0u32, sk.lwe_dimension().to_lwe_size(),
+                CiphertextModulus::new_native());
+            lwe_encryption::encrypt_lwe_ciphertext(
+                sk, &mut ctxt, Plaintext(0),
+                noise_param, &mut enc_generator);
+            samples.push(ctxt);
+        }
+
+
+        Self {
+            n: sk.lwe_dimension().to_lwe_size(),
+            n_samples: n_samples_,
+            alpha: noise_param,
+            prng: secret_generator,
+            samples
+        }
+
+
+    }
+
+    pub fn from_client_key(ck: &ClientKey, n_samples_: usize) -> Self {
+        Self::new(&ck.lwe_secret_key, n_samples_)
+    }
+
+    pub fn encrypt(self: &mut Self, result: &mut LweCiphertext<LweSampleType>, message: u32) {
+        // Assume result is already 0-filled
+        let mut choices = vec![0u32; self.n_samples];
+        self.prng.fill_slice_with_random_uniform_binary(choices.as_mut_slice());
+        let rbody = result.get_mut_body();
+        for i in 0..self.n_samples {
+            if choices[i] == 0 {
+                let __body = self.samples[i].get_mut_body();
+                *rbody.data = (*rbody.data).wrapping_add(*__body.data);
+            }
+        }
+        *rbody.data = (*rbody.data).wrapping_add(message << (32 - 4));
+    }
+}
+
+pub struct ThFHE {
+    ncr_cache: HashMap::<(usize, usize), usize>,
+    shared_key_repo: HashMap<(usize, usize), GlweSecretKey<Vec<TorusType>>>,
+    pub pk: ThFHEPubKey,
+    pub sk: ClientKey,
+    pub bk: ServerKey,
+    pub k: usize
+}
+
+pub struct ThFHEKeyShare {
+    pub shared_key_repo: HashMap<i32, GlweSecretKey<Vec<TorusType>>>,	/* Stores <group_id>: <key_share> */
+    mother: &'static mut ThFHE
+}
+
+
+impl ThFHE {
+    pub fn new(k: usize) -> Self {
+        let cks = ClientKey::new(&TFHE_LIB_PARAMETERS);
+        let sks = ServerKey::new(&cks);
+        let pubkey = ThFHEPubKey::from_client_key(&cks, 10);
+        
+        Self {
+            ncr_cache: HashMap::<(usize, usize), usize>::new(),
+            shared_key_repo: HashMap::<(usize, usize), GlweSecretKey<LweSampleType>>::new(),
+            pk: pubkey,
+            sk: cks,
+            bk: sks,
+            k
+        }
+    }
+    fn ncr(self: &Self, n: usize, r: usize) -> usize {
+        if r == 0 {
+            return 1;
+        }else if r == 1 {
+            return n;
+        }
+
+        match self.ncr_cache.get(&(n, r)) {
+            Some(val) => *val,
+            None => {
+                self.ncr(n, r - 1) + self.ncr(n - 1, r - 1)
+            }
+            
+        }
+    }
+
+}
+
+pub(crate) fn matrix_copy(dst: &mut Array2<u32>, src: &Array2<u32>, dstR: usize, dstC: usize) {
+    // for i in dstR..(dstR + src.dim().0){
+    //     for j in dstC..(dstC + src.dim().1){
+    //         (*dst)[[i, j]] = (*src)[[i - dstR, j - dstC]];
+    //     }
+    // }
+    assert!(dstR + src.dim().0 <= dst.dim().0);
+    assert!(dstC + src.dim().1 <= dst.dim().1);
+    dst.slice_mut(s![dstR..(dstR + src.dim().0), dstC..(dstC + src.dim().1)]).assign(src);
+}
+
+pub(crate) fn opt_AND_combine(t: usize, k: usize) -> Array2<u32> {
+    let I = Array::eye(k);
+    let kt = k * t;
+    let mut Mf = Array::zeros([kt, kt]);
+
+    for r in 0..t {
+		for c in 0..t {
+			if r == 0 || c == t - r {
+				matrix_copy(&mut Mf, &I, r*k, c*k);
+			}
+		}
+	}
+
+    Mf
+}
+
+pub(crate) fn opt_OR_combine(k: usize, t: usize, l: usize, A: Array2<u32>) -> Array2<u32> {
+	let mut F = Array::zeros([A.dim().0, k]);
+	let mut R = Array::zeros([A.dim().0, A.dim().1 - k]);
+
+	for r in 0..A.dim().0 {
+		for c in 0..A.dim().1{
+			if c < k{
+				F[[r, c]] = A[[r, c]];
+			}else{
+				R[[r, c - k]] = A[[r, c]];
+			}
+		}
+	}
+
+	let mut M = Array::zeros([l*k*t, k*(t-1) * l + k]);
+	for i in 0..l {
+		matrix_copy(&mut M, &F, i*k*t, 0);
+		matrix_copy(&mut M, &R, i*k*t, k + i*k*(t-1));
+	}
+
+	M
+}
+
+
+impl ThFHE {
+    fn build_distribution_matrix(self: &Self, t: usize, k: usize, p: usize) -> Array2<u32> {
+        let M1 = opt_AND_combine(t, k);
+        opt_OR_combine(k, t, self.ncr(p, t), M1)
+    }
+
+    fn build_rho(self: &Self, k: usize, p: usize, e: usize, key: &GlweSecretKey<Vec<TorusType>>) -> Array2<u32>{
+        let N = self.pk.n.0;
+        let mut rho = Array::zeros([e, N]);
+        let key = key.clone().into_container();
+        for row in 0..k {
+            for col in 0..N {
+                rho[[row,col]] = key[row * N + col];
+            }
+        }
+        
+        let mut seeder = new_seeder();
+        let seeder = seeder.as_mut();
+
+        let mut secret_generator =
+            SecretRandomGenerator::<ActivatedRandomGenerator>::new(seeder.seed());
+
+        let mut __randvals = vec![0; (e - k) * N];
+        secret_generator.fill_slice_with_random_uniform_binary(__randvals.as_mut_slice());
+        let mut __rj = 0;
+
+        for row in k..e{
+            for col in 0..N{
+                rho[[row, col]] = __randvals[__rj];
+                __rj += 1;
+            }
+        } 
+        
+        rho
+    }
+
+    fn find_parties(self: &Self, pt: &mut Vec<usize>, gid: usize, t: usize, p: usize) {
+        let mut mem = 0;
+        let mut tmp = 0;
+        let mut gid = gid;
+
+        pt.clear();
+
+        for i in 1..p {
+            // dbg!("{} {} {} {}", p, i, t, mem);
+            if mem + 1 > t {
+                break;
+            }
+            tmp = self.ncr(p - i, t - mem -1);
+            if gid > tmp {
+                gid -= tmp;
+            }else{
+                pt.push(i);
+                mem += 1;
+            }
+            if mem + (p-i) == t {
+                for j in (i + 1)..(p + 1) {
+                    pt.push(j);
+                }
+                break;
+            }
+        }
+    }
+
+    pub fn find_group_id(self: &Self, parties: Vec<usize>, t: usize, p: usize) -> usize{
+        let mut mem = 0;
+        let mut group_count = 1;
+        for i in 1..(p + 1) {
+            if parties.iter().position(|&x| x == i) != None {
+                mem += 1;
+            }else{
+                group_count += self.ncr(p - i, t - mem - 1);
+            }
+            if mem == t {
+                break;
+            }
+        }
+        
+        group_count
+    }
+
+    pub fn distribute_shares(self: &mut Self, S: Array2<u32>, t: usize, p: usize)  {
+        let r = S.dim().0;
+        let N = self.pk.n.0;
+        let mut row = 1;
+        let mut group_id: usize = 0;
+        let mut row_count = 0;
+        let mut parties = Vec::<usize>::new();
+
+        while row <= r {
+            group_id = ((row as f64)/((self.k*t) as f64)).ceil() as usize;
+            self.find_parties(&mut parties, group_id, t, p);
+            for it in 1..(t + 1) {
+                row_count = row + (it - 1) * self.k;
+                let mut key_vec = Vec::<TorusType>::new();
+                for i in 0..self.k {
+                    for j in 0..N {
+                        key_vec.push(S[[row_count + i - 1, j]]);
+                    }
+                }
+                self.shared_key_repo.insert(
+                    (parties[it-1], group_id),
+                    GlweSecretKey::from_container(key_vec, PolynomialSize(N))
+                );
+            }
+            row += self.k*t;
+        }
+    }
+
+    pub fn share_secret(self: &mut Self, t: usize, p: usize) {
+        let key = &self.sk.glwe_secret_key;
+        let k = self.k;
+        let N = self.pk.n.0;
+
+        let M = self.build_distribution_matrix(t, k, p);
+        // println!("M = {}", M);
+        let d = M.dim().0;
+        let e = M.dim().1;
+
+        let rho = self.build_rho(k, p, e, key);
+        // println!("rho = {}", rho);
+
+
+        let shares = M.dot(&rho);
+        // println!("M . rho = {}", shares);
+        
+        self.distribute_shares(shares, t, p);
+    }
+}
+
+impl ThFHEKeyShare {
+    pub fn new(mother: &'static mut ThFHE) -> Self {
+        Self { 
+            shared_key_repo: HashMap::<i32, GlweSecretKey<Vec<TorusType>>>::new(), mother}
+    }
+
+    pub fn partial_decrypt(self: &Self, ciphertext: &GlweCiphertext<Vec<TorusType>>,
+            parties: Vec<usize>, t: usize, p: usize, sd: f64) -> Polynomial<Vec<TorusType>> {
+        let k = self.mother.k;
+        assert_eq!(k, 1);
+        let N = self.mother.pk.n.0;
+        let group_id = self.mother.find_group_id(parties, t, p);
+        let part_key = &self.shared_key_repo[&(group_id as i32)];
+
+        let mut partial_cipher = Polynomial::new(0, PolynomialSize(N));
+        // for j in 0..N {
+        //     partial_cipher->coefsT[j] = 0;
+        // }
+        let mut __gaussian = vec![0u32; k * N];
+        let mut seeder = new_seeder();
+        let seeder = seeder.as_mut();
+
+        let mut gen:RandomGenerator<SoftwareRandomGenerator> = RandomGenerator::new(seeder.seed());
+        gen.fill_slice_with_random_gaussian(__gaussian.as_mut_slice(), 0.0, sd);
+        let mut smudging_err = Polynomial::from_container(__gaussian);
+        //  GlweCiphertext::from_container(__gaussian, N, ciphertext_modulus::CiphertextModulus);
+        // // for j in 0..N {
+        //     smudging_err[j] = Gaussian
+        // }
+        let (mask, _body) = ciphertext.get_mask_and_body();
+        polynomial_algorithms::polynomial_wrapping_add_multisum_assign(
+            &mut smudging_err, &mask.as_polynomial_list(), &part_key.as_polynomial_list());
+        
+        // torusPolynomialAddMulR(partial_cipher, &part_key->key[j], &ciphertext->a[j]);
+
+        // torusPolynomialAddTo(partial_cipher, smudging_err);
+        // for j in 0..N {
+        //     partial_ciphertext->coefsT[j] = partial_cipher->coefsT[j];
+        // }
+
+        smudging_err
+    }
+}
+
+// pub fn final_decrypt(ciphertext: &GlweCiphertext<Vec<TorusType>>, partial_ciphertexts: Vec<Polynomial<Vec<TorusType>>>,
+//         parties: Vec<usize>, t: usize, p: usize, N: usize) -> i32 {
+// 	let result_msg = 0;
+// 	let result = partial_ciphertexts[0].clone();
+// 	torusPolynomialCopy(result, ciphertext->b);
+// 	for(int i = 0; i < t; i++){
+// 		if(i == 0){
+// 			torusPolynomialSubTo(result, partial_ciphertexts[i]);
+// 		}
+// 		else{
+// 			torusPolynomialAddTo(result, partial_ciphertexts[i]);
+// 		}
+// 	}
+
+// 	result_msg = (result->coefsT[0] > 0) ? 1 : 0;
+//     return result_msg;
+// }

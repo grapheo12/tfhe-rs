@@ -69,11 +69,19 @@ serde-wasm-bindgen = { version = "0.4", optional = true }
 getrandom = { version = "0.2.8", optional = true }
 bytemuck = "1.13.1"
 
+# thfhe dependencies
+ndarray = { version = "0.15.0", features = ["blas"] }
+blas-src = { version = "0.8", features = ["openblas"] }
+openblas-src = { version = "0.10", features = ["cblas", "system"] }
+rand = "0.8.5"
+rand_distr = "0.4.3"
+
 [features]
 boolean = []
 shortint = []
 integer = ["shortint"]
 internal-keycache = ["lazy_static", "fs2", "bincode"]
+thfhe = ["boolean"]
 
 # Experimental section
 experimental = []
@@ -185,6 +193,11 @@ required-features = ["boolean", "shortint", "integer", "internal-keycache"]
 [[example]]
 name = "generates_test_keys"
 required-features = ["shortint", "internal-keycache"]
+
+
+[[example]]
+name = "thfhe_example"
+required-features = ["shortint", "boolean", "internal-keycache", "thfhe"]
 
 [[example]]
 name = "boolean_key_sizes"

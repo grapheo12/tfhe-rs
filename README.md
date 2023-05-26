@@ -1,3 +1,11 @@
+# ThFHE setup
+
+1. Install Rust > 1.69
+2. Install OpenBLAS
+3. Run `make thfhe_test`
+
+Code is in `src/thfhe/`. Run example is in `src/examples/thfhe_example.rs`.
+
 <p align="center">
 <!-- product name logo -->
   <img width=600 src="https://user-images.githubusercontent.com/5758427/231206749-8f146b97-3c5a-4201-8388-3ffa88580415.png">

@@ -374,3 +374,7 @@ conformance: fmt
 .PHONY: help # Generate list of targets with descriptions
 help:
 	@grep '^\.PHONY: .* #' Makefile | sed 's/\.PHONY: \(.*\) # \(.*\)/\1\t\2/' | expand -t30 | sort
+
+.PHONY: thfhe_test
+thfhe_test:
+	RUST_BACKTRACE=1 cargo run --release --package tfhe --example thfhe_example --features="shortint boolean internal-keycache thfhe" -- 10 15

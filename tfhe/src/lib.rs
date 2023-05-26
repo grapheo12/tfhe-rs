@@ -57,3 +57,6 @@ mod test_user_docs;
 pub(crate) mod high_level_api;
 #[cfg(any(feature = "boolean", feature = "shortint", feature = "integer"))]
 pub use high_level_api::*;
+
+#[cfg(feature = "thfhe")]
+pub mod thfhe;
