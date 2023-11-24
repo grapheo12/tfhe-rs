@@ -2,6 +2,7 @@ extern crate blas_src;
 
 use concrete_csprng::generators::SoftwareRandomGenerator;
 
+use crate::FheBoolParameters;
 // use crate::core_crypto::algorithms::slice_algorithms::*;
 use crate::core_crypto::algorithms::*;
 // use crate::core_crypto::commons::dispersion::DispersionParameter;
@@ -336,7 +337,7 @@ impl ThFHEKeyShare {
         // for j in 0..N {
         //     partial_cipher->coefsT[j] = 0;
         // }
-        let mut __gaussian = vec![0u32; k * N];
+        let mut __gaussian = vec![0u32; N];
         let mut seeder = new_seeder();
         let seeder = seeder.as_mut();
 
@@ -348,6 +349,7 @@ impl ThFHEKeyShare {
         //     smudging_err[j] = Gaussian
         // }
         let (mask, _body) = ciphertext.get_mask_and_body();
+        
         polynomial_algorithms::polynomial_wrapping_add_multisum_assign(
             &mut smudging_err, &mask.as_polynomial_list(), &part_key.as_polynomial_list());
         
@@ -362,20 +364,72 @@ impl ThFHEKeyShare {
     }
 }
 
-// pub fn final_decrypt(ciphertext: &GlweCiphertext<Vec<TorusType>>, partial_ciphertexts: Vec<Polynomial<Vec<TorusType>>>,
-//         parties: Vec<usize>, t: usize, p: usize, N: usize) -> i32 {
-// 	let result_msg = 0;
-// 	let result = partial_ciphertexts[0].clone();
-// 	torusPolynomialCopy(result, ciphertext->b);
-// 	for(int i = 0; i < t; i++){
-// 		if(i == 0){
-// 			torusPolynomialSubTo(result, partial_ciphertexts[i]);
-// 		}
-// 		else{
-// 			torusPolynomialAddTo(result, partial_ciphertexts[i]);
-// 		}
-// 	}
+pub fn final_decrypt(ciphertext: &GlweCiphertext<Vec<TorusType>>, partial_ciphertexts: Vec<Polynomial<Vec<TorusType>>>,
+        parties: Vec<usize>, t: usize, p: usize, N: usize) -> i32 {
+	let mut result_msg = 0;
+    let mut _c = ciphertext.clone();
+    let (_mask, mut body) = _c.get_mut_mask_and_body();
+	let mut result = body.as_mut_polynomial();
 
-// 	result_msg = (result->coefsT[0] > 0) ? 1 : 0;
-//     return result_msg;
-// }
+    for i in 0..t{
+        let p = match partial_ciphertexts.get(i) {
+            Some(_p) => _p,
+            None => {
+                panic!("Size mismatch");
+            }
+        };
+
+        if i == 0 {
+            polynomial_algorithms::polynomial_wrapping_sub_assign(&mut result, p);
+        }else{
+            polynomial_algorithms::polynomial_wrapping_add_assign(&mut result, p);
+        }
+    }
+	
+
+	let coeff = match result.get(0) {
+        Some(c) => c,
+        None => {
+            panic!("Not supposed to happen");
+        }
+    };
+    if (*coeff) > 0 {
+        result_msg = 1;
+    } else{
+        result_msg = 0;
+    }
+    return result_msg;
+}
+
+
+pub fn TLweFromLwe(cipher: &LweCiphertext<Vec<TorusType>>) -> GlweCiphertext<Vec<TorusType>>{
+    let (mask, body) = cipher.get_mask_and_body();
+    
+    let mut v = vec![0u32; cipher.lwe_size().0 * 2];
+
+    for i in 0..cipher.lwe_size().0 {
+        if i == 0 {
+            v[i] = match mask.as_ref().get(i) {
+                Some(_v) => *_v,
+                None => {
+                    panic!("Not supposed to happen");
+                }
+            }
+        }else{
+            v[i] = match mask.as_ref().get(cipher.lwe_size().0 - i) {
+                Some(_v) => (-(*_v as i32)) as u32,
+                None => {
+                    panic!("Not supposed to happen");
+                }
+            }
+        }
+    }
+    v[cipher.lwe_size().0] = *(body.data);
+
+    GlweCiphertext::<Vec<TorusType>>::from_container(v, PolynomialSize(cipher.lwe_size().0), cipher.ciphertext_modulus())
+}
+
+
+pub fn TLweKeyFromLweKey(key: &LweSecretKey<Vec<TorusType>>) -> GlweSecretKey<Vec<TorusType>> {
+    GlweSecretKey::<Vec<TorusType>>::from_container(key.as_ref().to_vec(), PolynomialSize(key.lwe_dimension().0))
+}
