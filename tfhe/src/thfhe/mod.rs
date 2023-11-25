@@ -25,7 +25,6 @@ use ndarray::prelude::*;
 type TorusType = u32;
 type LweSampleType = Vec<TorusType>;
 
-
 pub struct ThFHEPubKey {
     pub n: LweSize,
     pub n_samples: usize,
@@ -75,6 +74,22 @@ impl ThFHEPubKey {
         Self::new(&ck.lwe_secret_key, n_samples_)
     }
 
+    pub fn clone(&self) -> Self {
+        let mut seeder = new_seeder();
+        let seeder = seeder.as_mut();
+
+        let secret_generator =
+            SecretRandomGenerator::<ActivatedRandomGenerator>::new(seeder.seed());
+
+        Self {
+            n: self.n.clone(),
+            n_samples: self.n_samples,
+            alpha: self.alpha,
+            samples: self.samples.clone(),
+            prng: secret_generator
+        }
+    }
+
     pub fn encrypt(self: &mut Self, result: &mut LweCiphertext<LweSampleType>, message: u32) {
         // Assume result is already 0-filled
         let mut choices = vec![0u32; self.n_samples];
@@ -99,9 +114,9 @@ pub struct ThFHE {
     pub k: usize
 }
 
-pub struct ThFHEKeyShare {
-    pub shared_key_repo: HashMap<i32, GlweSecretKey<Vec<TorusType>>>,	/* Stores <group_id>: <key_share> */
-    mother: &'static mut ThFHE
+pub struct ThFHEKeyShare<'a> {
+    pub shared_key_repo: HashMap<usize, GlweSecretKey<Vec<TorusType>>>,	/* Stores <group_id>: <key_share> */
+    mother: &'a ThFHE
 }
 
 
@@ -117,6 +132,16 @@ impl ThFHE {
             pk: pubkey,
             sk: cks,
             bk: sks,
+            k
+        }
+    }
+    pub fn from_key(k: usize, cks: &ClientKey, sks: &ServerKey, pubkey: &ThFHEPubKey) -> Self {
+        Self {
+            ncr_cache: HashMap::<(usize, usize), usize>::new(),
+            shared_key_repo: HashMap::<(usize, usize), GlweSecretKey<LweSampleType>>::new(),
+            pk: pubkey.clone(),
+            sk: cks.clone(),
+            bk: sks.clone(),
             k
         }
     }
@@ -196,7 +221,7 @@ impl ThFHE {
     }
 
     fn build_rho(self: &Self, k: usize, p: usize, e: usize, key: &GlweSecretKey<Vec<TorusType>>) -> Array2<u32>{
-        let N = self.pk.n.0;
+        let N = self.pk.n.0 - 1;
         let mut rho = Array::zeros([e, N]);
         let key = key.clone().into_container();
         for row in 0..k {
@@ -253,7 +278,7 @@ impl ThFHE {
         }
     }
 
-    pub fn find_group_id(self: &Self, parties: Vec<usize>, t: usize, p: usize) -> usize{
+    pub fn find_group_id(self: &Self, parties: &Vec<usize>, t: usize, p: usize) -> usize{
         let mut mem = 0;
         let mut group_count = 1;
         for i in 1..(p + 1) {
@@ -272,7 +297,7 @@ impl ThFHE {
 
     pub fn distribute_shares(self: &mut Self, S: Array2<u32>, t: usize, p: usize)  {
         let r = S.dim().0;
-        let N = self.pk.n.0;
+        let N = self.pk.n.0 - 1;
         let mut row = 1;
         let mut group_id: usize = 0;
         let mut row_count = 0;
@@ -299,9 +324,9 @@ impl ThFHE {
     }
 
     pub fn share_secret(self: &mut Self, t: usize, p: usize) {
-        let key = &self.sk.glwe_secret_key;
+        let key = &TLweKeyFromLweKey(&self.sk.lwe_secret_key);
         let k = self.k;
-        let N = self.pk.n.0;
+        let N = self.pk.n.0 - 1;
 
         let M = self.build_distribution_matrix(t, k, p);
         // println!("M = {}", M);
@@ -319,21 +344,26 @@ impl ThFHE {
     }
 }
 
-impl ThFHEKeyShare {
-    pub fn new(mother: &'static mut ThFHE) -> Self {
+impl<'a> ThFHEKeyShare<'a> {
+    pub fn new(mother: &'a ThFHE, party_id: usize) -> Self {
+        let mut skr = HashMap::<usize, GlweSecretKey<Vec<TorusType>>>::new();
+        for it in mother.shared_key_repo.iter() {
+            if it.0.0 == party_id {
+                skr.insert(it.0.1, it.1.clone());
+            }
+        }
         Self { 
-            shared_key_repo: HashMap::<i32, GlweSecretKey<Vec<TorusType>>>::new(), mother}
+            shared_key_repo: skr, mother}
     }
 
     pub fn partial_decrypt(self: &Self, ciphertext: &GlweCiphertext<Vec<TorusType>>,
-            parties: Vec<usize>, t: usize, p: usize, sd: f64) -> Polynomial<Vec<TorusType>> {
+            parties: &Vec<usize>, t: usize, p: usize, sd: f64) -> Polynomial<Vec<TorusType>> {
         let k = self.mother.k;
         assert_eq!(k, 1);
-        let N = self.mother.pk.n.0;
-        let group_id = self.mother.find_group_id(parties, t, p);
-        let part_key = &self.shared_key_repo[&(group_id as i32)];
+        let N = self.mother.pk.n.0 - 1;
+        let group_id = self.mother.find_group_id(&parties, t, p);
+        let part_key = &self.shared_key_repo[&group_id];
 
-        let mut partial_cipher = Polynomial::new(0, PolynomialSize(N));
         // for j in 0..N {
         //     partial_cipher->coefsT[j] = 0;
         // }
@@ -386,7 +416,7 @@ pub fn final_decrypt(ciphertext: &GlweCiphertext<Vec<TorusType>>, partial_cipher
         }
     }
 	
-
+    println!("{}", result.polynomial_size().0);
 	let coeff = match result.get(0) {
         Some(c) => c,
         None => {
@@ -405,28 +435,30 @@ pub fn final_decrypt(ciphertext: &GlweCiphertext<Vec<TorusType>>, partial_cipher
 pub fn TLweFromLwe(cipher: &LweCiphertext<Vec<TorusType>>) -> GlweCiphertext<Vec<TorusType>>{
     let (mask, body) = cipher.get_mask_and_body();
     
-    let mut v = vec![0u32; cipher.lwe_size().0 * 2];
+    let mut v = vec![0u32; mask.lwe_dimension().0 * 2];
 
-    for i in 0..cipher.lwe_size().0 {
+    println!("{} {}", cipher.lwe_size().0, mask.lwe_dimension().0);
+
+    for i in 0..mask.lwe_dimension().0 {
         if i == 0 {
             v[i] = match mask.as_ref().get(i) {
                 Some(_v) => *_v,
                 None => {
-                    panic!("Not supposed to happen");
+                    panic!("Not supposed to happen 1");
                 }
             }
         }else{
-            v[i] = match mask.as_ref().get(cipher.lwe_size().0 - i) {
+            v[i] = match mask.as_ref().get(mask.lwe_dimension().0 - i) {
                 Some(_v) => (-(*_v as i32)) as u32,
                 None => {
-                    panic!("Not supposed to happen");
+                    panic!("Not supposed to happen 2");
                 }
             }
         }
     }
-    v[cipher.lwe_size().0] = *(body.data);
+    v[mask.lwe_dimension().0] = *(body.data);
 
-    GlweCiphertext::<Vec<TorusType>>::from_container(v, PolynomialSize(cipher.lwe_size().0), cipher.ciphertext_modulus())
+    GlweCiphertext::<Vec<TorusType>>::from_container(v, PolynomialSize(mask.lwe_dimension().0), cipher.ciphertext_modulus())
 }
 
 

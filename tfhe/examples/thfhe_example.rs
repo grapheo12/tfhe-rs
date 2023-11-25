@@ -1,4 +1,4 @@
-use tfhe::thfhe::{ThFHEPubKey, ThFHE};
+use tfhe::thfhe::{ThFHEPubKey, ThFHE, ThFHEKeyShare, final_decrypt, TLweFromLwe};
 use tfhe::boolean::parameters::{DEFAULT_PARAMETERS, TFHE_LIB_PARAMETERS};
 use tfhe::boolean::{client_key, server_key, ciphertext};
 use tfhe::core_crypto::entities::LweCiphertext;
@@ -29,22 +29,46 @@ fn main() {
         let sks = server_key::ServerKey::new(&cks);
         let mut pubkey = ThFHEPubKey::from_client_key(&cks, 10);
 
+        println!("Lwe Dim: {}", pubkey.n.0);
         let mut ctext = LweCiphertext::new(0u32, pubkey.n, CiphertextModulus::new_native());
-        let msg = 1u32;
+        let msg = 0u32;
         pubkey.encrypt(&mut ctext, msg);
 
-        let __ctxt = ciphertext::Ciphertext::Encrypted(ctext);
+        let __ctxt = ciphertext::Ciphertext::Encrypted(ctext.clone());
         let dec = cks.decrypt(&__ctxt);
         println!("Original message: {} Decryption result: {}", msg, dec);
 
-        let mut thfhe = ThFHE::new(1);
+        let mut thfhe = ThFHE::from_key(1, &cks, &sks, &pubkey);
 
         println!("Sharing secret: {} out of {}", t, p);
         let start = Instant::now();
-        thfhe.share_secret(3, 5);
+        thfhe.share_secret(t, p);
         let end = Instant::now();
         let dur = end - start;
         println!("Time taken: {}ms or {}us", dur.as_millis(), dur.as_micros());
+
+        let rlwe_ctxt = TLweFromLwe(&ctext);
+        let mut parties = vec![];
+        for i in 0..t {
+            parties.push(i+1);
+        }
+        
+        let mut part_decs = vec![];
+        let N = thfhe.pk.n.0;
+        let sd = 0.0f64;
+        for party in &parties {
+            let shares = ThFHEKeyShare::new(&thfhe, *party);
+            let partdec = shares.partial_decrypt(&rlwe_ctxt, &parties, t, p, sd);
+            part_decs.push(partdec);
+
+        }
+
+
+        let thresult = final_decrypt(&rlwe_ctxt, part_decs, parties, t, p, N);
+        println!("Threshold decryption result: {}", thresult);
+
+
+
     }
 
 }
