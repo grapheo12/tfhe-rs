@@ -344,7 +344,6 @@ impl ThFHE {
     pub fn share_secret(self: &mut Self, t: usize, p: usize) {
         let key = &TLweKeyFromLweKey(&self.sk.lwe_secret_key);
         let k = self.k;
-        let N = self.pk.n.0 - 1;
 
         let M = self.build_distribution_matrix(t, k, p);
         // println!("M = {}", M);
@@ -378,7 +377,7 @@ impl<'a> ThFHEKeyShare<'a> {
             parties: &Vec<usize>, t: usize, p: usize, sd: f64) -> Polynomial<Vec<TorusType>> {
         let k = self.mother.k;
         assert_eq!(k, 1);
-        let N = self.mother.pk.n.0 - 1;
+        let N: usize = self.mother.pk.n.0 - 1;
         let group_id = self.mother.find_group_id(&parties, t, p);
         let part_key = &self.shared_key_repo[&group_id];
 
@@ -413,7 +412,7 @@ impl<'a> ThFHEKeyShare<'a> {
 }
 
 pub fn final_decrypt(ciphertext: &GlweCiphertext<Vec<TorusType>>, partial_ciphertexts: Vec<Polynomial<Vec<TorusType>>>,
-        parties: Vec<usize>, t: usize, p: usize, N: usize) -> i32 {
+        parties: Vec<usize>, t: usize, p: usize, N: usize) -> bool {
 	let mut result_msg = 0;
     let mut _c = ciphertext.clone();
     let (_mask, mut body) = _c.get_mut_mask_and_body();
@@ -441,12 +440,7 @@ pub fn final_decrypt(ciphertext: &GlweCiphertext<Vec<TorusType>>, partial_cipher
             panic!("Not supposed to happen");
         }
     };
-    if (*coeff) > 0 {
-        result_msg = 1;
-    } else{
-        result_msg = 0;
-    }
-    return result_msg;
+    return (*coeff) < (1 << 31);
 }
 
 

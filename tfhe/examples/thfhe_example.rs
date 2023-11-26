@@ -1,5 +1,6 @@
+use rayon::iter::ParallelDrainRange;
 use tfhe::core_crypto::algorithms::allocate_and_generate_new_lwe_public_key;
-use tfhe::thfhe::{ThFHEPubKey, ThFHE, ThFHEKeyShare, final_decrypt, TLweFromLwe};
+use tfhe::thfhe::{ThFHEPubKey, ThFHE, ThFHEKeyShare, final_decrypt, TLweFromLwe, TLweKeyFromLweKey};
 use tfhe::boolean::parameters::{DEFAULT_PARAMETERS, TFHE_LIB_PARAMETERS};
 use tfhe::boolean::{client_key, server_key, ciphertext};
 use tfhe::core_crypto::entities::{LweCiphertext, LwePublicKey};
@@ -9,10 +10,13 @@ use std::time::{Instant, Duration};
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    assert_eq!(args.len(), 3, "Args: t p");
+    assert_eq!(args.len(), 4, "Args: t p msg");
 
     let t: usize = args[1].parse().unwrap();
     let p: usize = args[2].parse().unwrap();
+    let msg: bool = args[3].parse().unwrap();
+
+    println!("Plaintext message: {}", msg);
 
     let boolean_params_vec = vec![
         (DEFAULT_PARAMETERS, "DEFAULT_PARAMETERS"),
@@ -33,7 +37,7 @@ fn main() {
 
         println!("Lwe Dim: {}", pubkey.n.0);
         let mut ctext = LweCiphertext::new(0u32, pubkey.n, CiphertextModulus::new_native());
-        let msg = true;
+        // let msg = false;
         pubkey.encrypt(&mut ctext, msg);
 
         let __ctxt = ciphertext::Ciphertext::Encrypted(ctext.clone());
@@ -60,6 +64,16 @@ fn main() {
         let sd = 0.0f64;
         for party in &parties {
             let shares = ThFHEKeyShare::new(&thfhe, *party);
+            if t == 1{
+                // Secret share must match the secret key
+                let idx = 1;
+                let part_key_ = shares.shared_key_repo.get(&idx).unwrap();
+                let gkey_ = TLweKeyFromLweKey(&cks.lwe_secret_key);
+                for (a, b) in part_key_.clone().into_container().iter().zip(gkey_.into_container()){
+                    assert_eq!(*a, b);
+                }
+
+            }
             let partdec = shares.partial_decrypt(&rlwe_ctxt, &parties, t, p, sd);
             part_decs.push(partdec);
 
