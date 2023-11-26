@@ -3,6 +3,8 @@ extern crate blas_src;
 use concrete_csprng::generators::SoftwareRandomGenerator;
 
 use crate::FheBoolParameters;
+use crate::boolean::{PLAINTEXT_FALSE, PLAINTEXT_TRUE};
+use crate::boolean::prelude::BooleanParameters;
 // use crate::core_crypto::algorithms::slice_algorithms::*;
 use crate::core_crypto::algorithms::*;
 // use crate::core_crypto::commons::dispersion::DispersionParameter;
@@ -12,13 +14,14 @@ use crate::core_crypto::commons::math::random::{ActivatedRandomGenerator, Gaussi
 use crate::core_crypto::commons::{parameters::*, ciphertext_modulus};
 // use crate::core_crypto::commons::traits::*;
 use crate::core_crypto::entities::*;
-use crate::core_crypto::prelude::StandardDev;
+use crate::core_crypto::prelude::{StandardDev, UnsignedTorus};
 use crate::core_crypto::seeders::new_seeder;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::ops::IndexMut;
 use crate::boolean::{client_key::ClientKey, server_key::ServerKey};
 use crate::boolean::parameters::{DEFAULT_PARAMETERS, TFHE_LIB_PARAMETERS};
+use crate::core_crypto::commons::numeric::Numeric;
 
 use ndarray::prelude::*;
 
@@ -30,11 +33,12 @@ pub struct ThFHEPubKey {
     pub n_samples: usize,
     pub alpha: StandardDev,
     pub samples: Vec<LweCiphertext<Vec<TorusType>>>,
-    prng: SecretRandomGenerator<SoftwareRandomGenerator>
+    prng: SecretRandomGenerator<SoftwareRandomGenerator>,
+    pub params: BooleanParameters
 }
 
 impl ThFHEPubKey {
-    pub fn new(sk: &LweSecretKey<LweSampleType>, n_samples_: usize) -> Self {
+    pub fn new(sk: &LweSecretKey<LweSampleType>, n_samples_: usize, params: &BooleanParameters) -> Self {
         let mut samples = Vec::new();
 
         let mut seeder = new_seeder();
@@ -46,32 +50,35 @@ impl ThFHEPubKey {
         let mut enc_generator =
             EncryptionRandomGenerator::<ActivatedRandomGenerator>::new(seeder.seed(), seeder);
 
-        let noise_param = StandardDev(0.01);
+        let noise_param = params.lwe_modular_std_dev;
 
         for _ in 0..n_samples_ {
             let mut ctxt = LweCiphertext::new(
                 0u32, sk.lwe_dimension().to_lwe_size(),
                 CiphertextModulus::new_native());
             lwe_encryption::encrypt_lwe_ciphertext(
-                sk, &mut ctxt, Plaintext(0),
+                sk, &mut ctxt, Plaintext(TorusType::ZERO),
                 noise_param, &mut enc_generator);
             samples.push(ctxt);
         }
 
+        let actual_pkey = allocate_and_generate_new_lwe_public_key(sk, LwePublicKeyZeroEncryptionCount(n_samples_), params.lwe_modular_std_dev, CiphertextModulus::new_native(), &mut enc_generator);
 
         Self {
             n: sk.lwe_dimension().to_lwe_size(),
             n_samples: n_samples_,
             alpha: noise_param,
             prng: secret_generator,
-            samples
+            samples,
+            params: params.clone(),
+
         }
 
 
     }
 
-    pub fn from_client_key(ck: &ClientKey, n_samples_: usize) -> Self {
-        Self::new(&ck.lwe_secret_key, n_samples_)
+    pub fn from_client_key(ck: &ClientKey, n_samples_: usize, params: &BooleanParameters) -> Self {
+        Self::new(&ck.lwe_secret_key, n_samples_, params)
     }
 
     pub fn clone(&self) -> Self {
@@ -86,22 +93,33 @@ impl ThFHEPubKey {
             n_samples: self.n_samples,
             alpha: self.alpha,
             samples: self.samples.clone(),
-            prng: secret_generator
+            prng: secret_generator,
+            params: self.params.clone()
         }
     }
 
-    pub fn encrypt(self: &mut Self, result: &mut LweCiphertext<LweSampleType>, message: u32) {
+    pub fn encrypt(self: &mut Self, result: &mut LweCiphertext<LweSampleType>, message: bool) {
         // Assume result is already 0-filled
+        let encoded_msg: u32 = match message {
+            true => PLAINTEXT_TRUE,
+            false => PLAINTEXT_FALSE,
+        };
+        // encrypt_lwe_ciphertext_with_public_key(&self.actual_pkey, result, Plaintext(encoded_msg), &mut self.prng);
         let mut choices = vec![0u32; self.n_samples];
         self.prng.fill_slice_with_random_uniform_binary(choices.as_mut_slice());
-        let rbody = result.get_mut_body();
+        let mut v = vec![0u32; self.samples[0].lwe_size().0];
         for i in 0..self.n_samples {
             if choices[i] == 0 {
-                let __body = self.samples[i].get_mut_body();
-                *rbody.data = (*rbody.data).wrapping_add(*__body.data);
+                let __body = self.samples[i].clone().into_container();
+                assert!(v.len() == __body.len(), "Yo!");
+                slice_algorithms::slice_wrapping_add_assign(v.as_mut_slice(), __body.as_slice());
             }
         }
-        *rbody.data = (*rbody.data).wrapping_add(message << (32 - 4));
+        result.clone_from(&LweCiphertext::<LweSampleType>::from_container(v, CiphertextModulus::new_native()));
+        let rbody = result.get_mut_body();
+
+        
+        *rbody.data = (*rbody.data).wrapping_add(Plaintext(encoded_msg).0);
     }
 }
 
@@ -124,7 +142,7 @@ impl ThFHE {
     pub fn new(k: usize) -> Self {
         let cks = ClientKey::new(&TFHE_LIB_PARAMETERS);
         let sks = ServerKey::new(&cks);
-        let pubkey = ThFHEPubKey::from_client_key(&cks, 10);
+        let pubkey = ThFHEPubKey::from_client_key(&cks, 10, &TFHE_LIB_PARAMETERS);
         
         Self {
             ncr_cache: HashMap::<(usize, usize), usize>::new(),

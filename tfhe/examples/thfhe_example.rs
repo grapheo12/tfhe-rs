@@ -1,8 +1,9 @@
+use tfhe::core_crypto::algorithms::allocate_and_generate_new_lwe_public_key;
 use tfhe::thfhe::{ThFHEPubKey, ThFHE, ThFHEKeyShare, final_decrypt, TLweFromLwe};
 use tfhe::boolean::parameters::{DEFAULT_PARAMETERS, TFHE_LIB_PARAMETERS};
 use tfhe::boolean::{client_key, server_key, ciphertext};
-use tfhe::core_crypto::entities::LweCiphertext;
-use tfhe::core_crypto::commons::ciphertext_modulus::CiphertextModulus;
+use tfhe::core_crypto::entities::{LweCiphertext, LwePublicKey};
+use tfhe::core_crypto::commons::ciphertext_modulus::{CiphertextModulus, self};
 use std::env;
 use std::time::{Instant, Duration};
 
@@ -25,13 +26,14 @@ fn main() {
             params_name.to_lowercase()
         );
 
+
         let cks = client_key::ClientKey::new(params);
         let sks = server_key::ServerKey::new(&cks);
-        let mut pubkey = ThFHEPubKey::from_client_key(&cks, 10);
+        let mut pubkey = ThFHEPubKey::from_client_key(&cks, 10, params);
 
         println!("Lwe Dim: {}", pubkey.n.0);
         let mut ctext = LweCiphertext::new(0u32, pubkey.n, CiphertextModulus::new_native());
-        let msg = 0u32;
+        let msg = true;
         pubkey.encrypt(&mut ctext, msg);
 
         let __ctxt = ciphertext::Ciphertext::Encrypted(ctext.clone());
